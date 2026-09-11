@@ -448,7 +448,8 @@
 </main>
 
 <footer class="bar">
-  <button class="btn-export" id="btn_finish" style="max-width:320px;">Finalizar visita (exportar + imprimir)</button>
+  <button class="btn-export" id="btn_finish" style="max-width:320px;">Finalizar visita (JSON + PDF)</button>
+  <button class="btn-print" id="btn_pdf">Solo PDF</button>
 </footer>
 
 <script>
@@ -758,51 +759,77 @@ function initMic(){
 initMic();
 
 // ---------- export ----------
-document.getElementById('btn_finish').addEventListener('click', async ()=>{
-  saveAll();
+// iOS Safari sólo acepta window.print() de forma SÍNCRONA dentro del gesto del
+// usuario: cualquier await o setTimeout previo lo anula silenciosamente. PC y
+// Android sí lo permiten fuera del gesto, y por eso el PDF fallaba sólo en
+// iPhone. Aquí no hay nada asíncrono antes de imprimir; la subida va después.
 
-  const ref = document.getElementById('f_ref').value.trim() || 'sin_referencia';
-  const fecha = document.getElementById('f_fecha').value || new Date().toISOString().slice(0,10);
-  const jsonText = JSON.stringify(data, null, 2);
-  const nombreArchivo = `replanteo_${ref}_${fecha}.json`;
-  const btn = document.getElementById('btn_finish');
-  const textoOriginal = btn.textContent;
+function prepararImpresion(){
+  document.querySelectorAll('details.section').forEach(d=>d.open=true);
+  void document.body.offsetHeight; // fuerza el reflow antes de imprimir
+}
 
-  // 1) Guardar SIEMPRE una copia local en el iPad (esto nunca falla por falta de internet)
+function descargarJson(jsonText, nombreArchivo){
   const blob = new Blob([jsonText], {type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = nombreArchivo;
   a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 60000);
+}
 
-  // 2) Intentar subir automáticamente a SharePoint si hay una URL configurada
+async function subirWebhook(jsonText){
   const webhook = (localStorage.getItem(WEBHOOK_KEY) || '').trim();
-  if(webhook){
-    btn.textContent = 'Subiendo a SharePoint…';
-    try{
-      const controller = new AbortController();
-      const timeout = setTimeout(()=>controller.abort(), 15000);
-      const resp = await fetch(webhook, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: jsonText,
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      cfgStatus.textContent = resp.ok
-        ? '✅ Última visita subida correctamente a SharePoint (' + new Date().toLocaleTimeString() + ').'
-        : '⚠️ El servidor respondió con error al subir. El archivo ha quedado guardado en el iPad — súbelo a mano.';
-    }catch(err){
-      cfgStatus.textContent = '⚠️ Sin conexión o fallo de subida. El archivo ha quedado guardado en el iPad — súbelo a mano cuando tengas internet.';
-    }
-  } else {
+  if(!webhook){
     cfgStatus.textContent = 'Archivo guardado. Elige la carpeta de OneDrive/SharePoint en el cuadro de Safari para subirlo.';
+    return;
+  }
+  const btn = document.getElementById('btn_finish');
+  const textoOriginal = btn.textContent;
+  btn.textContent = 'Subiendo a SharePoint…';
+  try{
+    const controller = new AbortController();
+    const timeout = setTimeout(()=>controller.abort(), 15000);
+    const resp = await fetch(webhook, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: jsonText,
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    cfgStatus.textContent = resp.ok
+      ? '✅ Última visita subida correctamente a SharePoint (' + new Date().toLocaleTimeString() + ').'
+      : '⚠️ El servidor respondió con error al subir. El archivo ha quedado guardado en el iPad — súbelo a mano.';
+  }catch(err){
+    cfgStatus.textContent = '⚠️ Sin conexión o fallo de subida. El archivo ha quedado guardado en el iPad — súbelo a mano cuando tengas internet.';
   }
   btn.textContent = textoOriginal;
+}
 
-  // 3) Abrir todas las secciones y lanzar la impresión/PDF
-  document.querySelectorAll('details.section').forEach(d=>d.open=true);
-  setTimeout(()=>window.print(), 400);
+document.getElementById('btn_finish').addEventListener('click', ()=>{
+  saveAll();
+
+  const ref = document.getElementById('f_ref').value.trim() || 'sin_referencia';
+  const fecha = document.getElementById('f_fecha').value || new Date().toISOString().slice(0,10);
+  const jsonText = JSON.stringify(data, null, 2);
+
+  // 1) JSON: copia local en el dispositivo, nunca depende de internet
+  descargarJson(jsonText, `replanteo_${ref}_${fecha}.json`);
+
+  // 2) PDF: dentro del mismo gesto, sin await ni setTimeout por medio
+  prepararImpresion();
+  window.print();
+
+  // 3) Subida a SharePoint, ya fuera del gesto
+  subirWebhook(jsonText);
+});
+
+// Respaldo para iPhone: si Safari se queda con la descarga del JSON y no llega
+// a abrir la vista de impresión, este botón lanza el PDF en un gesto limpio.
+document.getElementById('btn_pdf').addEventListener('click', ()=>{
+  saveAll();
+  prepararImpresion();
+  window.print();
 });
 
 // ---------- load previous session if ref already filled ----------
